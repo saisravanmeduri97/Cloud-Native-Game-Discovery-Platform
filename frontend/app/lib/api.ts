@@ -1,6 +1,3 @@
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
-
 export type SearchResult = {
   id: number;
   title: string;
@@ -40,7 +37,7 @@ export async function searchGames(
   query: string,
   limit = 6
 ): Promise<SearchResult[]> {
-  const response = await fetch(`${API_BASE_URL}/search`, {
+  const response = await fetch(`/api/search`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -62,7 +59,7 @@ export async function searchGames(
 }
 
 export async function getGameById(gameId: string): Promise<GameDetail> {
-  const response = await fetch(`${API_BASE_URL}/games/${gameId}`, {
+  const response = await fetch(`/api/games/${gameId}`, {
     cache: "no-store",
   });
 
