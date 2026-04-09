@@ -10,6 +10,7 @@ spec:
       labels:
         app: game-embed
     spec:
+      serviceAccountName: game-backend-ksa
       restartPolicy: Never
       containers:
         - name: embed
