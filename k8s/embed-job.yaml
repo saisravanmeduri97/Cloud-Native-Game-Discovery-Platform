@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: game-embed-job
+  namespace: game-platform
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: game-embed
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: embed
+          image: __DOCKERHUB_USERNAME__/game-ingestion:__IMAGE_TAG__
+          imagePullPolicy: Always
+          command: ["python", "-m", "app.embed_games"]
+          env:
+            - name: GDP_PROJECT_NAME
+              value: cloud-native-game-discovery-platform
+            - name: GDP_DB_HOST
+              value: game-postgres-svc
+            - name: GDP_DB_PORT
+              value: "5432"
+            - name: GDP_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: gdp-db-secret
+                  key: POSTGRES_DB
+            - name: GDP_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: gdp-db-secret
+                  key: POSTGRES_USER
+            - name: GDP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gdp-db-secret
+                  key: POSTGRES_PASSWORD
+            - name: GDP_GCP_PROJECT_ID
+              value: "__GCP_PROJECT_ID__"
+            - name: GDP_GCP_LOCATION
+              value: "us-central1"
+            - name: GDP_EMBEDDING_MODEL
+              value: "gemini-embedding-001"

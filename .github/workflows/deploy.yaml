@@ -1,0 +1,188 @@
+name: Application Build and Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ingestion_job:
+        description: "Run ingestion job after app deploy"
+        required: false
+        default: "true"
+      run_embed_job:
+        description: "Run embed job after app deploy"
+        required: false
+        default: "true"
+
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "ingestion/**"
+      - "k8s/**"
+      - ".github/workflows/deploy.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  K8S_NAMESPACE: game-platform
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/game-backend:${{ steps.meta.outputs.image_tag }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/game-frontend:${{ steps.meta.outputs.image_tag }}
+
+      - name: Build and push ingestion image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ingestion
+          file: ./ingestion/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/game-ingestion:${{ steps.meta.outputs.image_tag }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v3
+        with:
+          cluster_name: ${{ secrets.GKE_CLUSTER }}
+          location: ${{ secrets.GKE_LOCATION }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Create namespace
+        run: kubectl apply -f k8s/namespace.yaml
+
+      - name: Create database secret
+        run: |
+          kubectl create secret generic gdp-db-secret \
+            --namespace $K8S_NAMESPACE \
+            --from-literal=POSTGRES_DB='${{ secrets.POSTGRES_DB }}' \
+            --from-literal=POSTGRES_USER='${{ secrets.POSTGRES_USER }}' \
+            --from-literal=POSTGRES_PASSWORD='${{ secrets.POSTGRES_PASSWORD }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create application secret
+        run: |
+          kubectl create secret generic gdp-app-secret \
+            --namespace $K8S_NAMESPACE \
+            --from-literal=GDP_RAWG_API_KEY='${{ secrets.GDP_RAWG_API_KEY }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Render manifests
+        run: |
+          rm -rf rendered-k8s
+          mkdir -p rendered-k8s
+          cp k8s/*.yaml rendered-k8s/
+
+          find rendered-k8s -type f -name "*.yaml" -exec sed -i "s|__DOCKERHUB_USERNAME__|${{ secrets.DOCKERHUB_USERNAME }}|g" {} \;
+          find rendered-k8s -type f -name "*.yaml" -exec sed -i "s|__IMAGE_TAG__|${{ needs.build-and-push.outputs.image_tag }}|g" {} \;
+          find rendered-k8s -type f -name "*.yaml" -exec sed -i "s|__GCP_PROJECT_ID__|${{ secrets.GCP_PROJECT_ID }}|g" {} \;
+
+      - name: Deploy PostgreSQL service
+        run: kubectl apply -f rendered-k8s/postgres-service.yaml
+
+      - name: Deploy PostgreSQL statefulset
+        run: kubectl apply -f rendered-k8s/postgres-statefulset.yaml
+
+      - name: Wait for PostgreSQL
+        run: kubectl rollout status statefulset/game-postgres -n $K8S_NAMESPACE --timeout=600s
+
+      - name: Deploy backend service account
+        run: kubectl apply -f rendered-k8s/backend-serviceaccount.yaml
+
+      - name: Deploy backend service
+        run: kubectl apply -f rendered-k8s/backend-service.yaml
+
+      - name: Deploy backend deployment
+        run: kubectl apply -f rendered-k8s/backend-deployment.yaml
+
+      - name: Wait for backend rollout
+        run: kubectl rollout status deployment/game-backend -n $K8S_NAMESPACE --timeout=600s
+
+      - name: Deploy frontend service
+        run: kubectl apply -f rendered-k8s/frontend-service.yaml
+
+      - name: Deploy frontend deployment
+        run: kubectl apply -f rendered-k8s/frontend-deployment.yaml
+
+      - name: Wait for frontend rollout
+        run: kubectl rollout status deployment/game-frontend -n $K8S_NAMESPACE --timeout=600s
+
+      - name: Delete existing ingestion job if present
+        if: ${{ github.event.inputs.run_ingestion_job != 'false' }}
+        run: kubectl delete job game-ingestion-job -n $K8S_NAMESPACE --ignore-not-found=true
+
+      - name: Run ingestion job
+        if: ${{ github.event.inputs.run_ingestion_job != 'false' }}
+        run: kubectl apply -f rendered-k8s/ingestion-job.yaml
+
+      - name: Wait for ingestion job
+        if: ${{ github.event.inputs.run_ingestion_job != 'false' }}
+        run: kubectl wait --for=condition=complete job/game-ingestion-job -n $K8S_NAMESPACE --timeout=1800s
+
+      - name: Delete existing embed job if present
+        if: ${{ github.event.inputs.run_embed_job != 'false' }}
+        run: kubectl delete job game-embed-job -n $K8S_NAMESPACE --ignore-not-found=true
+
+      - name: Run embed job
+        if: ${{ github.event.inputs.run_embed_job != 'false' }}
+        run: kubectl apply -f rendered-k8s/embed-job.yaml
+
+      - name: Wait for embed job
+        if: ${{ github.event.inputs.run_embed_job != 'false' }}
+        run: kubectl wait --for=condition=complete job/game-embed-job -n $K8S_NAMESPACE --timeout=3600s
+
+      - name: Show workloads
+        run: |
+          kubectl get pods -n $K8S_NAMESPACE
+          kubectl get svc -n $K8S_NAMESPACE
+          kubectl get jobs -n $K8S_NAMESPACE || true

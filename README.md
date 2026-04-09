@@ -68,25 +68,7 @@ Build
 make build  
 
 Run  
-make up  
-
----
-
-## Environment
-
-Copy `.env.example` → `.env` and update values  
-
-Do not commit `.env`
-
----
-
-## Repo Structure
-
-backend/  
-frontend/  
-ingestion/  
-k8s/  
-infra/  
+make up
 
 ---
 
@@ -99,7 +81,3 @@ infra/
 - Add monitoring  
 
 ---
-
-## Summary
-
-A production-style cloud-native AI system combining semantic search, data pipelines, and Kubernetes deployment.
